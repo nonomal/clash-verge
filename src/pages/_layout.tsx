@@ -1,93 +1,125 @@
-import useSWR, { SWRConfig, useSWRConfig } from "swr";
-import { useEffect, useMemo } from "react";
+import dayjs from "dayjs";
+import i18next from "i18next";
+import relativeTime from "dayjs/plugin/relativeTime";
+import { SWRConfig, mutate } from "swr";
+import { useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { Route, Routes } from "react-router-dom";
-import { alpha, createTheme, List, Paper, ThemeProvider } from "@mui/material";
+import { alpha, List, Paper, ThemeProvider } from "@mui/material";
 import { listen } from "@tauri-apps/api/event";
 import { appWindow } from "@tauri-apps/api/window";
 import { routers } from "./_routers";
-import { getAxios } from "../services/api";
-import { getVergeConfig } from "../services/cmds";
-import LogoSvg from "../assets/image/logo.svg";
-import LayoutItem from "../components/layout/layout-item";
-import LayoutControl from "../components/layout/layout-control";
-import LayoutTraffic from "../components/layout/layout-traffic";
-import UpdateButton from "../components/layout/update-button";
+import { getAxios } from "@/services/api";
+import { useVerge } from "@/hooks/use-verge";
+import { ReactComponent as LogoSvg } from "@/assets/image/logo.svg";
+import { BaseErrorBoundary, Notice } from "@/components/base";
+import { LayoutItem } from "@/components/layout/layout-item";
+import { LayoutControl } from "@/components/layout/layout-control";
+import { LayoutTraffic } from "@/components/layout/layout-traffic";
+import { UpdateButton } from "@/components/layout/update-button";
+import { useCustomTheme } from "@/components/layout/use-custom-theme";
+import getSystem from "@/utils/get-system";
+import "dayjs/locale/ru";
+import "dayjs/locale/zh-cn";
 
-const isMacos = navigator.userAgent.includes("Mac OS X");
+dayjs.extend(relativeTime);
+
+const OS = getSystem();
 
 const Layout = () => {
-  const { mutate } = useSWRConfig();
-  const { data } = useSWR("getVergeConfig", getVergeConfig);
+  const { t } = useTranslation();
 
-  const blur = !!data?.theme_blur;
-  const mode = data?.theme_mode ?? "light";
+  const { theme } = useCustomTheme();
+
+  const { verge } = useVerge();
+  const { theme_blur, language } = verge || {};
 
   useEffect(() => {
     window.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") appWindow.hide();
+      // macOS有cmd+w
+      if (e.key === "Escape" && OS !== "macos") {
+        appWindow.close();
+      }
     });
 
-    listen("restart_clash", async () => {
+    listen("verge://refresh-clash-config", async () => {
       // the clash info may be updated
       await getAxios(true);
-      // make sure that the clash is ok
-      setTimeout(() => mutate("getProxies"), 1000);
-      setTimeout(() => mutate("getProxies"), 2000);
+      mutate("getProxies");
+      mutate("getVersion");
       mutate("getClashConfig");
+      mutate("getProviders");
+    });
+
+    // update the verge config
+    listen("verge://refresh-verge-config", () => mutate("getVergeConfig"));
+
+    // 设置提示监听
+    listen("verge://notice-message", ({ payload }) => {
+      const [status, msg] = payload as [string, string];
+      switch (status) {
+        case "set_config::ok":
+          Notice.success("Refresh clash config");
+          break;
+        case "set_config::error":
+          Notice.error(msg);
+          break;
+        default:
+          break;
+      }
     });
   }, []);
 
-  const theme = useMemo(() => {
-    // const background = mode === "light" ? "#f5f5f5" : "#000";
-    const selectColor = mode === "light" ? "#f5f5f5" : "#d5d5d5";
-
-    const rootEle = document.documentElement;
-    rootEle.style.background = "transparent";
-    rootEle.style.setProperty("--selection-color", selectColor);
-
-    return createTheme({
-      breakpoints: {
-        values: { xs: 0, sm: 650, md: 900, lg: 1200, xl: 1536 },
-      },
-      palette: {
-        mode,
-        primary: { main: "#5b5c9d" },
-        text: { primary: "#637381", secondary: "#909399" },
-      },
-    });
-  }, [mode]);
-
-  const onDragging = (e: any) => {
-    if (e?.target?.dataset?.windrag) {
-      appWindow.startDragging();
+  useEffect(() => {
+    if (language) {
+      dayjs.locale(language === "zh" ? "zh-cn" : language);
+      i18next.changeLanguage(language);
     }
-  };
+  }, [language]);
 
   return (
-    <SWRConfig value={{}}>
+    <SWRConfig value={{ errorRetryCount: 3 }}>
       <ThemeProvider theme={theme}>
         <Paper
           square
           elevation={0}
-          className={`${isMacos ? "macos " : ""}layout`}
-          onPointerDown={onDragging}
+          className={`${OS} layout`}
+          onPointerDown={(e: any) => {
+            if (e.target?.dataset?.windrag) appWindow.startDragging();
+          }}
+          onContextMenu={(e) => {
+            // only prevent it on Windows
+            const validList = ["input", "textarea"];
+            const target = e.currentTarget;
+            if (
+              OS === "windows" &&
+              !(
+                validList.includes(target.tagName.toLowerCase()) ||
+                target.isContentEditable
+              )
+            ) {
+              e.preventDefault();
+            }
+          }}
           sx={[
-            (theme) => ({
-              bgcolor: alpha(theme.palette.background.paper, blur ? 0.85 : 1),
+            ({ palette }) => ({
+              bgcolor: alpha(palette.background.paper, theme_blur ? 0.8 : 1),
             }),
           ]}
         >
           <div className="layout__left" data-windrag>
             <div className="the-logo" data-windrag>
-              <img src={LogoSvg} alt="" data-windrag />
+              <LogoSvg />
 
-              <UpdateButton className="the-newbtn" />
+              {!(OS === "windows" && WIN_PORTABLE) && (
+                <UpdateButton className="the-newbtn" />
+              )}
             </div>
 
-            <List className="the-menu" data-windrag>
+            <List className="the-menu">
               {routers.map((router) => (
                 <LayoutItem key={router.label} to={router.link}>
-                  {router.label}
+                  {t(router.label)}
                 </LayoutItem>
               ))}
             </List>
@@ -98,7 +130,7 @@ const Layout = () => {
           </div>
 
           <div className="layout__right" data-windrag>
-            {!isMacos && (
+            {OS === "windows" && (
               <div className="the-bar">
                 <LayoutControl />
               </div>
@@ -107,7 +139,15 @@ const Layout = () => {
             <div className="the-content">
               <Routes>
                 {routers.map(({ label, link, ele: Ele }) => (
-                  <Route key={label} path={link} element={<Ele />} />
+                  <Route
+                    key={label}
+                    path={link}
+                    element={
+                      <BaseErrorBoundary key={label}>
+                        <Ele />
+                      </BaseErrorBoundary>
+                    }
+                  />
                 ))}
               </Routes>
             </div>

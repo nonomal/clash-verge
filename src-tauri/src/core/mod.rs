@@ -1,7 +1,12 @@
-mod clash;
-mod profiles;
-mod verge;
+pub mod clash_api;
+mod core;
+pub mod handle;
+pub mod hotkey;
+pub mod logger;
+pub mod manager;
+pub mod sysopt;
+pub mod timer;
+pub mod tray;
+pub mod win_service;
 
-pub use self::clash::*;
-pub use self::profiles::*;
-pub use self::verge::*;
+pub use self::core::*;

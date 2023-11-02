@@ -1,4 +1,4 @@
-import ReactDOM from "react-dom";
+import { createRoot } from "react-dom/client";
 import { ReactNode, useState } from "react";
 import { Box, IconButton, Slide, Snackbar, Typography } from "@mui/material";
 import { Close, CheckCircleRounded, ErrorRounded } from "@mui/icons-material";
@@ -11,7 +11,7 @@ interface InnerProps {
 }
 
 const NoticeInner = (props: InnerProps) => {
-  const { type, message, duration = 2000, onClose } = props;
+  const { type, message, duration = 1500, onClose } = props;
   const [visible, setVisible] = useState(true);
 
   const onBtnClose = () => {
@@ -26,12 +26,13 @@ const NoticeInner = (props: InnerProps) => {
     type === "info" ? (
       message
     ) : (
-      <Box sx={{ display: "flex", alignItems: "center" }}>
+      <Box sx={{ width: 328, display: "flex", alignItems: "center" }}>
         {type === "error" && <ErrorRounded color="error" />}
         {type === "success" && <CheckCircleRounded color="success" />}
 
         <Typography
-          sx={{ ml: 1, wordWrap: "break-word", wordBreak: "break-all" }}
+          component="span"
+          sx={{ ml: 1, wordWrap: "break-word", width: "calc(100% - 35px)" }}
         >
           {message}
         </Typography>
@@ -68,7 +69,7 @@ interface NoticeInstance {
 let parent: HTMLDivElement = null!;
 
 // @ts-ignore
-const Notice: NoticeInstance = (props) => {
+export const Notice: NoticeInstance = (props) => {
   if (!parent) {
     parent = document.createElement("div");
     document.body.appendChild(parent);
@@ -76,17 +77,18 @@ const Notice: NoticeInstance = (props) => {
 
   const container = document.createElement("div");
   parent.appendChild(container);
+  const root = createRoot(container);
 
   const onUnmount = () => {
-    const result = ReactDOM.unmountComponentAtNode(container);
-    if (result && parent) parent.removeChild(container);
+    root.unmount();
+    if (parent) setTimeout(() => parent.removeChild(container), 500);
   };
 
-  ReactDOM.render(<NoticeInner {...props} onClose={onUnmount} />, container);
+  root.render(<NoticeInner {...props} onClose={onUnmount} />);
 };
 
 (["info", "error", "success"] as const).forEach((type) => {
-  Notice[type] = (message, duration) => Notice({ type, message, duration });
+  Notice[type] = (message, duration) => {
+    setTimeout(() => Notice({ type, message, duration }), 0);
+  };
 });
-
-export default Notice;

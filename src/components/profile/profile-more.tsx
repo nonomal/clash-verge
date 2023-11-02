@@ -1,104 +1,101 @@
 import dayjs from "dayjs";
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useTranslation } from "react-i18next";
+import { useLockFn } from "ahooks";
 import {
-  alpha,
   Box,
+  Badge,
   Chip,
-  styled,
   Typography,
   MenuItem,
   Menu,
+  IconButton,
 } from "@mui/material";
-import { CmdType } from "../../services/types";
-import { viewProfile } from "../../services/cmds";
-import relativeTime from "dayjs/plugin/relativeTime";
-import ProfileEdit from "./profile-edit";
-import Notice from "../base/base-notice";
-import enhance from "../../services/enhance";
-
-dayjs.extend(relativeTime);
-
-const Wrapper = styled(Box)(({ theme }) => ({
-  width: "100%",
-  display: "block",
-  cursor: "pointer",
-  textAlign: "left",
-  borderRadius: theme.shape.borderRadius,
-  boxShadow: theme.shadows[2],
-  padding: "8px 16px",
-  boxSizing: "border-box",
-}));
+import { FeaturedPlayListRounded } from "@mui/icons-material";
+import { viewProfile } from "@/services/cmds";
+import { Notice } from "@/components/base";
+import { EditorViewer } from "./editor-viewer";
+import { ProfileBox } from "./profile-box";
+import { LogViewer } from "./log-viewer";
 
 interface Props {
   selected: boolean;
-  itemData: CmdType.ProfileItem;
+  itemData: IProfileItem;
+  enableNum: number;
+  logInfo?: [string, string][];
   onEnable: () => void;
   onDisable: () => void;
   onMoveTop: () => void;
   onMoveEnd: () => void;
   onDelete: () => void;
-  onEnhance: () => void;
+  onEdit: () => void;
 }
 
 // profile enhanced item
-const ProfileMore = (props: Props) => {
+export const ProfileMore = (props: Props) => {
   const {
     selected,
     itemData,
+    enableNum,
+    logInfo = [],
     onEnable,
     onDisable,
     onMoveTop,
     onMoveEnd,
     onDelete,
-    onEnhance,
+    onEdit,
   } = props;
 
   const { uid, type } = itemData;
+  const { t, i18n } = useTranslation();
   const [anchorEl, setAnchorEl] = useState<any>(null);
   const [position, setPosition] = useState({ left: 0, top: 0 });
-  const [editOpen, setEditOpen] = useState(false);
-  const [status, setStatus] = useState(enhance.status(uid));
+  const [fileOpen, setFileOpen] = useState(false);
+  const [logOpen, setLogOpen] = useState(false);
 
-  // unlisten when unmount
-  useEffect(() => enhance.listen(uid, setStatus), [uid]);
-
-  // error during enhanced mode
-  const hasError = selected && status?.status === "error";
-
-  const onEdit = () => {
+  const onEditInfo = () => {
     setAnchorEl(null);
-    setEditOpen(true);
+    onEdit();
   };
 
-  const onView = async () => {
+  const onEditFile = () => {
+    setAnchorEl(null);
+    setFileOpen(true);
+  };
+
+  const onOpenFile = useLockFn(async () => {
     setAnchorEl(null);
     try {
       await viewProfile(itemData.uid);
     } catch (err: any) {
       Notice.error(err?.message || err.toString());
     }
-  };
+  });
 
-  const closeWrapper = (fn: () => void) => () => {
+  const fnWrapper = (fn: () => void) => () => {
     setAnchorEl(null);
     return fn();
   };
 
+  const hasError = !!logInfo.find((e) => e[0] === "exception");
+  const showMove = enableNum > 1 && !hasError;
+
   const enableMenu = [
-    { label: "Disable", handler: closeWrapper(onDisable) },
-    { label: "Refresh", handler: closeWrapper(onEnhance) },
-    { label: "Edit", handler: onEdit },
-    { label: "File", handler: onView },
-    { label: "To Top", show: !hasError, handler: closeWrapper(onMoveTop) },
-    { label: "To End", show: !hasError, handler: closeWrapper(onMoveEnd) },
-    { label: "Delete", handler: closeWrapper(onDelete) },
+    { label: "Disable", handler: fnWrapper(onDisable) },
+    { label: "Edit Info", handler: onEditInfo },
+    { label: "Edit File", handler: onEditFile },
+    { label: "Open File", handler: onOpenFile },
+    { label: "To Top", show: showMove, handler: fnWrapper(onMoveTop) },
+    { label: "To End", show: showMove, handler: fnWrapper(onMoveEnd) },
+    { label: "Delete", handler: fnWrapper(onDelete) },
   ];
 
   const disableMenu = [
-    { label: "Enable", handler: closeWrapper(onEnable) },
-    { label: "Edit", handler: onEdit },
-    { label: "File", handler: onView },
-    { label: "Delete", handler: closeWrapper(onDelete) },
+    { label: "Enable", handler: fnWrapper(onEnable) },
+    { label: "Edit Info", handler: onEditInfo },
+    { label: "Edit File", handler: onEditFile },
+    { label: "Open File", handler: onOpenFile },
+    { label: "Delete", handler: fnWrapper(onDelete) },
   ];
 
   const boxStyle = {
@@ -111,39 +108,9 @@ const ProfileMore = (props: Props) => {
 
   return (
     <>
-      <Wrapper
-        sx={({ palette }) => {
-          // todo
-          // 区分 selected 和 error 和 mode 下各种颜色的排列组合
-          const { mode, primary, text, grey, error } = palette;
-          const key = `${mode}-${selected}`;
-          const bgkey = hasError ? `${mode}-err` : key;
-
-          const bgcolor = {
-            "light-true": alpha(primary.main, 0.15),
-            "light-false": palette.background.paper,
-            "dark-true": alpha(primary.main, 0.35),
-            "dark-false": alpha(grey[700], 0.35),
-            "light-err": alpha(error.main, 0.12),
-            "dark-err": alpha(error.main, 0.3),
-          }[bgkey]!;
-
-          const color = {
-            "light-true": text.secondary,
-            "light-false": text.secondary,
-            "dark-true": alpha(text.secondary, 0.6),
-            "dark-false": alpha(text.secondary, 0.6),
-          }[key]!;
-
-          const h2color = {
-            "light-true": primary.main,
-            "light-false": text.primary,
-            "dark-true": primary.light,
-            "dark-false": text.primary,
-          }[key]!;
-
-          return { bgcolor, color, "& h2": { color: h2color } };
-        }}
+      <ProfileBox
+        aria-selected={selected}
+        onDoubleClick={onEditFile}
         // onClick={() => onSelect(false)}
         onContextMenu={(event) => {
           const { clientX, clientY } = event;
@@ -152,7 +119,12 @@ const ProfileMore = (props: Props) => {
           event.preventDefault();
         }}
       >
-        <Box display="flex" justifyContent="space-between" alignItems="center">
+        <Box
+          display="flex"
+          justifyContent="space-between"
+          alignItems="center"
+          mb={0.5}
+        >
           <Typography
             width="calc(100% - 52px)"
             variant="h6"
@@ -168,39 +140,57 @@ const ProfileMore = (props: Props) => {
             color="primary"
             size="small"
             variant="outlined"
-            sx={{ textTransform: "capitalize" }}
+            sx={{ height: 20, textTransform: "capitalize" }}
           />
         </Box>
 
         <Box sx={boxStyle}>
-          {hasError ? (
-            <Typography
-              noWrap
-              color="error"
-              sx={{ width: "calc(100% - 75px)" }}
-              title={status.message}
-            >
-              {status.message}
-            </Typography>
+          {selected && type === "script" ? (
+            hasError ? (
+              <Badge color="error" variant="dot" overlap="circular">
+                <IconButton
+                  size="small"
+                  edge="start"
+                  color="error"
+                  title="Console"
+                  onClick={() => setLogOpen(true)}
+                >
+                  <FeaturedPlayListRounded fontSize="inherit" />
+                </IconButton>
+              </Badge>
+            ) : (
+              <IconButton
+                size="small"
+                edge="start"
+                color="inherit"
+                title="Console"
+                onClick={() => setLogOpen(true)}
+              >
+                <FeaturedPlayListRounded fontSize="inherit" />
+              </IconButton>
+            )
           ) : (
             <Typography
               noWrap
               title={itemData.desc}
-              sx={{ width: "calc(100% - 75px)" }}
+              sx={i18n.language === "zh" ? { width: "calc(100% - 75px)" } : {}}
             >
               {itemData.desc}
             </Typography>
           )}
 
           <Typography
+            noWrap
             component="span"
-            title="updated time"
+            title={`Updated Time: ${parseExpire(itemData.updated)}`}
             style={{ fontSize: 14 }}
           >
-            {parseExpire(itemData.updated)}
+            {!!itemData.updated
+              ? dayjs(itemData.updated! * 1000).fromNow()
+              : ""}
           </Typography>
         </Box>
-      </Wrapper>
+      </ProfileBox>
 
       <Menu
         open={!!anchorEl}
@@ -208,6 +198,8 @@ const ProfileMore = (props: Props) => {
         onClose={() => setAnchorEl(null)}
         anchorPosition={position}
         anchorReference="anchorPosition"
+        transitionDuration={225}
+        MenuListProps={{ sx: { py: 0.5 } }}
         onContextMenu={(e) => {
           setAnchorEl(null);
           e.preventDefault();
@@ -219,18 +211,26 @@ const ProfileMore = (props: Props) => {
             <MenuItem
               key={item.label}
               onClick={item.handler}
-              sx={{ minWidth: 133 }}
+              sx={{ minWidth: 120 }}
+              dense
             >
-              {item.label}
+              {t(item.label)}
             </MenuItem>
           ))}
       </Menu>
 
-      {editOpen && (
-        <ProfileEdit
-          open={editOpen}
-          itemData={itemData}
-          onClose={() => setEditOpen(false)}
+      <EditorViewer
+        uid={uid}
+        open={fileOpen}
+        mode={type === "merge" ? "yaml" : "javascript"}
+        onClose={() => setFileOpen(false)}
+      />
+
+      {selected && (
+        <LogViewer
+          open={logOpen}
+          logInfo={logInfo}
+          onClose={() => setLogOpen(false)}
         />
       )}
     </>
@@ -241,5 +241,3 @@ function parseExpire(expire?: number) {
   if (!expire) return "-";
   return dayjs(expire * 1000).format("YYYY-MM-DD");
 }
-
-export default ProfileMore;

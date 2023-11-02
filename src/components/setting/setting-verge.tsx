@@ -1,97 +1,199 @@
-import useSWR, { useSWRConfig } from "swr";
-import { IconButton, ListItemText, Switch, Typography } from "@mui/material";
-import {
-  getVergeConfig,
-  openAppDir,
-  openLogsDir,
-  patchVergeConfig,
-} from "../../services/cmds";
+import { useRef } from "react";
+import { useLockFn } from "ahooks";
+import { useTranslation } from "react-i18next";
+import { IconButton, MenuItem, Select, Typography } from "@mui/material";
+import { openAppDir, openCoreDir, openLogsDir } from "@/services/cmds";
 import { ArrowForward } from "@mui/icons-material";
-import { SettingList, SettingItem } from "./setting";
-import { CmdType } from "../../services/types";
-import { version } from "../../../package.json";
-import PaletteSwitch from "./palette-switch";
-import GuardState from "./guard-state";
+import { checkUpdate } from "@tauri-apps/api/updater";
+import { useVerge } from "@/hooks/use-verge";
+import { version } from "@root/package.json";
+import { DialogRef, Notice } from "@/components/base";
+import { SettingList, SettingItem } from "./mods/setting-comp";
+import { ThemeModeSwitch } from "./mods/theme-mode-switch";
+import { ConfigViewer } from "./mods/config-viewer";
+import { HotkeyViewer } from "./mods/hotkey-viewer";
+import { MiscViewer } from "./mods/misc-viewer";
+import { ThemeViewer } from "./mods/theme-viewer";
+import { GuardState } from "./mods/guard-state";
+import { LayoutViewer } from "./mods/layout-viewer";
+import { UpdateViewer } from "./mods/update-viewer";
+import getSystem from "@/utils/get-system";
 
 interface Props {
   onError?: (err: Error) => void;
 }
 
+const OS = getSystem();
+
 const SettingVerge = ({ onError }: Props) => {
-  const { mutate } = useSWRConfig();
-  const { data: vergeConfig } = useSWR("getVergeConfig", getVergeConfig);
+  const { t } = useTranslation();
 
-  const { theme_mode = "light", theme_blur = false, traffic_graph } =
-    vergeConfig ?? {};
+  const { verge, patchVerge, mutateVerge } = useVerge();
+  const { theme_mode, language } = verge ?? {};
 
-  const onSwitchFormat = (_e: any, value: boolean) => value;
-  const onChangeData = (patch: Partial<CmdType.VergeConfig>) => {
-    mutate("getVergeConfig", { ...vergeConfig, ...patch }, false);
+  const configRef = useRef<DialogRef>(null);
+  const hotkeyRef = useRef<DialogRef>(null);
+  const miscRef = useRef<DialogRef>(null);
+  const themeRef = useRef<DialogRef>(null);
+  const layoutRef = useRef<DialogRef>(null);
+  const updateRef = useRef<DialogRef>(null);
+
+  const onChangeData = (patch: Partial<IVergeConfig>) => {
+    mutateVerge({ ...verge, ...patch }, false);
   };
 
+  const onCheckUpdate = useLockFn(async () => {
+    try {
+      const info = await checkUpdate();
+      if (!info?.shouldUpdate) {
+        Notice.success("No Updates Available");
+      } else {
+        updateRef.current?.open();
+      }
+    } catch (err: any) {
+      Notice.error(err.message || err.toString());
+    }
+  });
+
   return (
-    <SettingList title="Verge Setting">
-      <SettingItem>
-        <ListItemText primary="Theme Mode" />
+    <SettingList title={t("Verge Setting")}>
+      <ThemeViewer ref={themeRef} />
+      <ConfigViewer ref={configRef} />
+      <HotkeyViewer ref={hotkeyRef} />
+      <MiscViewer ref={miscRef} />
+      <LayoutViewer ref={layoutRef} />
+      <UpdateViewer ref={updateRef} />
+
+      <SettingItem label={t("Language")}>
         <GuardState
-          value={theme_mode === "dark"}
-          valueProps="checked"
+          value={language ?? "en"}
           onCatch={onError}
-          onFormat={onSwitchFormat}
-          onChange={(e) => onChangeData({ theme_mode: e ? "dark" : "light" })}
-          onGuard={(e) =>
-            patchVergeConfig({ theme_mode: e ? "dark" : "light" })
-          }
+          onFormat={(e: any) => e.target.value}
+          onChange={(e) => onChangeData({ language: e })}
+          onGuard={(e) => patchVerge({ language: e })}
         >
-          <PaletteSwitch edge="end" />
+          <Select size="small" sx={{ width: 100, "> div": { py: "7.5px" } }}>
+            <MenuItem value="zh">中文</MenuItem>
+            <MenuItem value="en">English</MenuItem>
+            <MenuItem value="ru">Русский</MenuItem>
+          </Select>
         </GuardState>
       </SettingItem>
 
-      <SettingItem>
-        <ListItemText primary="Theme Blur" />
+      <SettingItem label={t("Theme Mode")}>
         <GuardState
-          value={theme_blur}
-          valueProps="checked"
+          value={theme_mode}
           onCatch={onError}
-          onFormat={onSwitchFormat}
-          onChange={(e) => onChangeData({ theme_blur: e })}
-          onGuard={(e) => patchVergeConfig({ theme_blur: e })}
+          onChange={(e) => onChangeData({ theme_mode: e })}
+          onGuard={(e) => patchVerge({ theme_mode: e })}
         >
-          <Switch edge="end" />
+          <ThemeModeSwitch />
         </GuardState>
       </SettingItem>
 
-      <SettingItem>
-        <ListItemText primary="Traffic Graph" />
-        <GuardState
-          value={traffic_graph ?? true}
-          valueProps="checked"
-          onCatch={onError}
-          onFormat={onSwitchFormat}
-          onChange={(e) => onChangeData({ traffic_graph: e })}
-          onGuard={(e) => patchVergeConfig({ traffic_graph: e })}
+      <SettingItem label={t("Theme Setting")}>
+        <IconButton
+          color="inherit"
+          size="small"
+          sx={{ my: "2px" }}
+          onClick={() => themeRef.current?.open()}
         >
-          <Switch edge="end" />
-        </GuardState>
-      </SettingItem>
-
-      <SettingItem>
-        <ListItemText primary="Open App Dir" />
-        <IconButton color="inherit" size="small" onClick={openAppDir}>
           <ArrowForward />
         </IconButton>
       </SettingItem>
 
-      <SettingItem>
-        <ListItemText primary="Open Logs Dir" />
-        <IconButton color="inherit" size="small" onClick={openLogsDir}>
+      <SettingItem label={t("Layout Setting")}>
+        <IconButton
+          color="inherit"
+          size="small"
+          sx={{ my: "2px" }}
+          onClick={() => layoutRef.current?.open()}
+        >
           <ArrowForward />
         </IconButton>
       </SettingItem>
 
-      <SettingItem>
-        <ListItemText primary="Version" />
-        <Typography sx={{ py: "6px" }}>v{version}</Typography>
+      <SettingItem label={t("Miscellaneous")}>
+        <IconButton
+          color="inherit"
+          size="small"
+          sx={{ my: "2px" }}
+          onClick={() => miscRef.current?.open()}
+        >
+          <ArrowForward />
+        </IconButton>
+      </SettingItem>
+
+      <SettingItem label={t("Hotkey Setting")}>
+        <IconButton
+          color="inherit"
+          size="small"
+          sx={{ my: "2px" }}
+          onClick={() => hotkeyRef.current?.open()}
+        >
+          <ArrowForward />
+        </IconButton>
+      </SettingItem>
+
+      <SettingItem label={t("Runtime Config")}>
+        <IconButton
+          color="inherit"
+          size="small"
+          sx={{ my: "2px" }}
+          onClick={() => configRef.current?.open()}
+        >
+          <ArrowForward />
+        </IconButton>
+      </SettingItem>
+
+      <SettingItem label={t("Open App Dir")}>
+        <IconButton
+          color="inherit"
+          size="small"
+          sx={{ my: "2px" }}
+          onClick={openAppDir}
+        >
+          <ArrowForward />
+        </IconButton>
+      </SettingItem>
+
+      <SettingItem label={t("Open Core Dir")}>
+        <IconButton
+          color="inherit"
+          size="small"
+          sx={{ my: "2px" }}
+          onClick={openCoreDir}
+        >
+          <ArrowForward />
+        </IconButton>
+      </SettingItem>
+
+      <SettingItem label={t("Open Logs Dir")}>
+        <IconButton
+          color="inherit"
+          size="small"
+          sx={{ my: "2px" }}
+          onClick={openLogsDir}
+        >
+          <ArrowForward />
+        </IconButton>
+      </SettingItem>
+
+      {!(OS === "windows" && WIN_PORTABLE) && (
+        <SettingItem label={t("Check for Updates")}>
+          <IconButton
+            color="inherit"
+            size="small"
+            sx={{ my: "2px" }}
+            onClick={onCheckUpdate}
+          >
+            <ArrowForward />
+          </IconButton>
+        </SettingItem>
+      )}
+
+      <SettingItem label={t("Verge Version")}>
+        <Typography sx={{ py: "7px", pr: 1 }}>v{version}</Typography>
       </SettingItem>
     </SettingList>
   );

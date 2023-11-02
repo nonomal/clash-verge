@@ -1,335 +1,280 @@
 use crate::{
-  core::{ClashInfo, PrfItem, Profiles, VergeConfig},
-  states::{ClashState, ProfilesState, VergeState},
-  utils::{dirs, sysopt::SysProxyConfig},
+    config::*,
+    core::*,
+    feat,
+    utils::{dirs, help},
 };
 use crate::{ret_err, wrap_err};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_yaml::Mapping;
-use std::{path::PathBuf, process::Command};
-use tauri::{api, Manager, State};
+use std::collections::{HashMap, VecDeque};
+use sysproxy::Sysproxy;
 
-/// get all profiles from `profiles.yaml`
+type CmdResult<T = ()> = Result<T, String>;
+
 #[tauri::command]
-pub fn get_profiles<'a>(profiles_state: State<'_, ProfilesState>) -> Result<Profiles, String> {
-  let profiles = profiles_state.0.lock().unwrap();
-  Ok(profiles.clone())
+pub fn get_profiles() -> CmdResult<IProfiles> {
+    Ok(Config::profiles().data().clone())
 }
 
-/// synchronize data irregularly
 #[tauri::command]
-pub fn sync_profiles(profiles_state: State<'_, ProfilesState>) -> Result<(), String> {
-  let mut profiles = profiles_state.0.lock().unwrap();
-  wrap_err!(profiles.sync_file())
+pub async fn enhance_profiles() -> CmdResult {
+    wrap_err!(CoreManager::global().update_config().await)?;
+    handle::Handle::refresh_clash();
+    Ok(())
 }
 
-/// import the profile from url
-/// and save to `profiles.yaml`
 #[tauri::command]
-pub async fn import_profile(
-  url: String,
-  with_proxy: bool,
-  profiles_state: State<'_, ProfilesState>,
-) -> Result<(), String> {
-  let item = wrap_err!(PrfItem::from_url(&url, None, None, with_proxy).await)?;
-
-  let mut profiles = profiles_state.0.lock().unwrap();
-  wrap_err!(profiles.append_item(item))
+pub async fn import_profile(url: String, option: Option<PrfOption>) -> CmdResult {
+    let item = wrap_err!(PrfItem::from_url(&url, None, None, option).await)?;
+    wrap_err!(Config::profiles().data().append_item(item))
 }
 
-/// new a profile
-/// append a temp profile item file to the `profiles` dir
-/// view the temp profile file by using vscode or other editor
 #[tauri::command]
-pub async fn create_profile(
-  item: PrfItem, // partial
-  profiles_state: State<'_, ProfilesState>,
-) -> Result<(), String> {
-  let item = wrap_err!(PrfItem::from(item).await)?;
-  let mut profiles = profiles_state.0.lock().unwrap();
-
-  wrap_err!(profiles.append_item(item))
+pub async fn create_profile(item: PrfItem, file_data: Option<String>) -> CmdResult {
+    let item = wrap_err!(PrfItem::from(item, file_data).await)?;
+    wrap_err!(Config::profiles().data().append_item(item))
 }
 
-/// Update the profile
 #[tauri::command]
-pub async fn update_profile(
-  index: String,
-  with_proxy: bool,
-  clash_state: State<'_, ClashState>,
-  profiles_state: State<'_, ProfilesState>,
-) -> Result<(), String> {
-  let url = {
-    // must release the lock here
-    let profiles = profiles_state.0.lock().unwrap();
+pub async fn update_profile(index: String, option: Option<PrfOption>) -> CmdResult {
+    wrap_err!(feat::update_profile(index, option).await)
+}
+
+#[tauri::command]
+pub async fn delete_profile(index: String) -> CmdResult {
+    let should_update = wrap_err!({ Config::profiles().data().delete_item(index) })?;
+    if should_update {
+        wrap_err!(CoreManager::global().update_config().await)?;
+        handle::Handle::refresh_clash();
+    }
+
+    Ok(())
+}
+
+/// 修改profiles的
+#[tauri::command]
+pub async fn patch_profiles_config(profiles: IProfiles) -> CmdResult {
+    wrap_err!({ Config::profiles().draft().patch_config(profiles) })?;
+
+    match CoreManager::global().update_config().await {
+        Ok(_) => {
+            handle::Handle::refresh_clash();
+            Config::profiles().apply();
+            wrap_err!(Config::profiles().data().save_file())?;
+            Ok(())
+        }
+        Err(err) => {
+            Config::profiles().discard();
+            log::error!(target: "app", "{err}");
+            Err(format!("{err}"))
+        }
+    }
+}
+
+/// 修改某个profile item的
+#[tauri::command]
+pub fn patch_profile(index: String, profile: PrfItem) -> CmdResult {
+    wrap_err!(Config::profiles().data().patch_item(index, profile))?;
+    wrap_err!(timer::Timer::global().refresh())
+}
+
+#[tauri::command]
+pub fn view_profile(index: String) -> CmdResult {
+    let file = {
+        wrap_err!(Config::profiles().latest().get_item(&index))?
+            .file
+            .clone()
+            .ok_or("the file field is null")
+    }?;
+
+    let path = wrap_err!(dirs::app_profiles_dir())?.join(file);
+    if !path.exists() {
+        ret_err!("the file not found");
+    }
+
+    wrap_err!(help::open_file(path))
+}
+
+#[tauri::command]
+pub fn read_profile_file(index: String) -> CmdResult<String> {
+    let profiles = Config::profiles();
+    let profiles = profiles.latest();
     let item = wrap_err!(profiles.get_item(&index))?;
+    let data = wrap_err!(item.read_file())?;
+    Ok(data)
+}
 
-    if item.url.is_none() {
-      ret_err!("failed to get the item url");
+#[tauri::command]
+pub fn save_profile_file(index: String, file_data: Option<String>) -> CmdResult {
+    if file_data.is_none() {
+        return Ok(());
     }
 
-    item.url.clone().unwrap()
-  };
-
-  let item = wrap_err!(PrfItem::from_url(&url, None, None, with_proxy).await)?;
-
-  let mut profiles = profiles_state.0.lock().unwrap();
-  wrap_err!(profiles.update_item(index.clone(), item))?;
-
-  // reactivate the profile
-  if Some(index) == profiles.get_current() {
-    let clash = clash_state.0.lock().unwrap();
-    wrap_err!(clash.activate(&profiles, false))?;
-  }
-
-  Ok(())
+    let profiles = Config::profiles();
+    let profiles = profiles.latest();
+    let item = wrap_err!(profiles.get_item(&index))?;
+    wrap_err!(item.save_file(file_data.unwrap()))
 }
 
-/// change the current profile
 #[tauri::command]
-pub fn select_profile(
-  index: String,
-  clash_state: State<'_, ClashState>,
-  profiles_state: State<'_, ProfilesState>,
-) -> Result<(), String> {
-  let mut profiles = profiles_state.0.lock().unwrap();
-  wrap_err!(profiles.put_current(index))?;
-
-  let clash = clash_state.0.lock().unwrap();
-  wrap_err!(clash.activate(&profiles, false))
+pub fn get_clash_info() -> CmdResult<ClashInfo> {
+    Ok(Config::clash().latest().get_client_info())
 }
 
-/// change the profile chain
 #[tauri::command]
-pub fn change_profile_chain(
-  chain: Option<Vec<String>>,
-  app_handle: tauri::AppHandle,
-  clash_state: State<'_, ClashState>,
-  profiles_state: State<'_, ProfilesState>,
-) -> Result<(), String> {
-  let mut clash = clash_state.0.lock().unwrap();
-  let mut profiles = profiles_state.0.lock().unwrap();
-
-  profiles.put_chain(chain);
-  clash.set_window(app_handle.get_window("main"));
-
-  wrap_err!(clash.activate_enhanced(&profiles, false))
+pub fn get_runtime_config() -> CmdResult<Option<Mapping>> {
+    Ok(Config::runtime().latest().config.clone())
 }
 
-/// manually exec enhanced profile
 #[tauri::command]
-pub fn enhance_profiles(
-  app_handle: tauri::AppHandle,
-  clash_state: State<'_, ClashState>,
-  profiles_state: State<'_, ProfilesState>,
-) -> Result<(), String> {
-  let mut clash = clash_state.0.lock().unwrap();
-  let profiles = profiles_state.0.lock().unwrap();
-
-  clash.set_window(app_handle.get_window("main"));
-
-  wrap_err!(clash.activate_enhanced(&profiles, false))
+pub fn get_runtime_yaml() -> CmdResult<String> {
+    let runtime = Config::runtime();
+    let runtime = runtime.latest();
+    let config = runtime.config.as_ref();
+    wrap_err!(config
+        .ok_or(anyhow::anyhow!("failed to parse config to yaml file"))
+        .and_then(
+            |config| serde_yaml::to_string(config).context("failed to convert config to yaml")
+        ))
 }
 
-/// delete profile item
 #[tauri::command]
-pub fn delete_profile(
-  index: String,
-  clash_state: State<'_, ClashState>,
-  profiles_state: State<'_, ProfilesState>,
-) -> Result<(), String> {
-  let mut profiles = profiles_state.0.lock().unwrap();
-
-  if wrap_err!(profiles.delete_item(index))? {
-    let clash = clash_state.0.lock().unwrap();
-    wrap_err!(clash.activate(&profiles, false))?;
-  }
-
-  Ok(())
+pub fn get_runtime_exists() -> CmdResult<Vec<String>> {
+    Ok(Config::runtime().latest().exists_keys.clone())
 }
 
-/// patch the profile config
 #[tauri::command]
-pub fn patch_profile(
-  index: String,
-  profile: PrfItem,
-  profiles_state: State<'_, ProfilesState>,
-) -> Result<(), String> {
-  let mut profiles = profiles_state.0.lock().unwrap();
-  wrap_err!(profiles.patch_item(index, profile))
+pub fn get_runtime_logs() -> CmdResult<HashMap<String, Vec<(String, String)>>> {
+    Ok(Config::runtime().latest().chain_logs.clone())
 }
 
-/// run vscode command to edit the profile
 #[tauri::command]
-pub fn view_profile(index: String, profiles_state: State<'_, ProfilesState>) -> Result<(), String> {
-  let profiles = profiles_state.0.lock().unwrap();
-  let item = wrap_err!(profiles.get_item(&index))?;
+pub async fn patch_clash_config(payload: Mapping) -> CmdResult {
+    wrap_err!(feat::patch_clash(payload).await)
+}
 
-  let file = item.file.clone();
-  if file.is_none() {
-    ret_err!("the file is null");
-  }
+#[tauri::command]
+pub fn get_verge_config() -> CmdResult<IVerge> {
+    Ok(Config::verge().data().clone())
+}
 
-  let path = dirs::app_profiles_dir().join(file.unwrap());
-  if !path.exists() {
-    ret_err!("the file not found");
-  }
+#[tauri::command]
+pub async fn patch_verge_config(payload: IVerge) -> CmdResult {
+    wrap_err!(feat::patch_verge(payload).await)
+}
 
-  // use vscode first
-  if let Ok(code) = which::which("code") {
-    #[cfg(target_os = "windows")]
-    {
-      use std::os::windows::process::CommandExt;
-
-      return match Command::new(code)
-        .creation_flags(0x08000000)
-        .arg(path)
-        .spawn()
-      {
-        Ok(_) => Ok(()),
-        Err(_) => Err("failed to open file by VScode".into()),
-      };
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    return match Command::new(code).arg(path).spawn() {
-      Ok(_) => Ok(()),
-      Err(_) => Err("failed to open file by VScode".into()),
-    };
-  }
-
-  open_path_cmd(path, "failed to open file by `open`")
+#[tauri::command]
+pub async fn change_clash_core(clash_core: Option<String>) -> CmdResult {
+    wrap_err!(CoreManager::global().change_core(clash_core).await)
 }
 
 /// restart the sidecar
 #[tauri::command]
-pub fn restart_sidecar(
-  clash_state: State<'_, ClashState>,
-  profiles_state: State<'_, ProfilesState>,
-) -> Result<(), String> {
-  let mut clash = clash_state.0.lock().unwrap();
-  let mut profiles = profiles_state.0.lock().unwrap();
-
-  wrap_err!(clash.restart_sidecar(&mut profiles))
+pub async fn restart_sidecar() -> CmdResult {
+    wrap_err!(CoreManager::global().run_core().await)
 }
 
-/// get the clash core info from the state
-/// the caller can also get the infomation by clash's api
 #[tauri::command]
-pub fn get_clash_info(clash_state: State<'_, ClashState>) -> Result<ClashInfo, String> {
-  let clash = clash_state.0.lock().unwrap();
-  Ok(clash.info.clone())
-}
+pub fn grant_permission(core: String) -> CmdResult {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    return wrap_err!(manager::grant_permission(core));
 
-/// update the clash core config
-/// after putting the change to the clash core
-/// then we should save the latest config
-#[tauri::command]
-pub fn patch_clash_config(
-  payload: Mapping,
-  clash_state: State<'_, ClashState>,
-  verge_state: State<'_, VergeState>,
-  profiles_state: State<'_, ProfilesState>,
-) -> Result<(), String> {
-  let mut clash = clash_state.0.lock().unwrap();
-  let mut verge = verge_state.0.lock().unwrap();
-  let mut profiles = profiles_state.0.lock().unwrap();
-  wrap_err!(clash.patch_config(payload, &mut verge, &mut profiles))
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    return Err("Unsupported target".into());
 }
 
 /// get the system proxy
 #[tauri::command]
-pub fn get_sys_proxy() -> Result<SysProxyConfig, String> {
-  wrap_err!(SysProxyConfig::get_sys())
+pub fn get_sys_proxy() -> CmdResult<Mapping> {
+    let current = wrap_err!(Sysproxy::get_system_proxy())?;
+
+    let mut map = Mapping::new();
+    map.insert("enable".into(), current.enable.into());
+    map.insert(
+        "server".into(),
+        format!("{}:{}", current.host, current.port).into(),
+    );
+    map.insert("bypass".into(), current.bypass.into());
+
+    Ok(map)
 }
 
-/// get the current proxy config
-/// which may not the same as system proxy
 #[tauri::command]
-pub fn get_cur_proxy(verge_state: State<'_, VergeState>) -> Result<Option<SysProxyConfig>, String> {
-  let verge = verge_state.0.lock().unwrap();
-  Ok(verge.cur_sysproxy.clone())
+pub fn get_clash_logs() -> CmdResult<VecDeque<String>> {
+    Ok(logger::Logger::global().get_log())
 }
 
-/// get the verge config
 #[tauri::command]
-pub fn get_verge_config(verge_state: State<'_, VergeState>) -> Result<VergeConfig, String> {
-  let verge = verge_state.0.lock().unwrap();
-  let mut config = verge.config.clone();
-
-  if config.system_proxy_bypass.is_none() && verge.cur_sysproxy.is_some() {
-    config.system_proxy_bypass = Some(verge.cur_sysproxy.clone().unwrap().bypass)
-  }
-
-  Ok(config)
+pub fn open_app_dir() -> CmdResult<()> {
+    let app_dir = wrap_err!(dirs::app_home_dir())?;
+    wrap_err!(open::that(app_dir))
 }
 
-/// patch the verge config
-/// this command only save the config and not responsible for other things
 #[tauri::command]
-pub fn patch_verge_config(
-  payload: VergeConfig,
-  clash_state: State<'_, ClashState>,
-  verge_state: State<'_, VergeState>,
-  profiles_state: State<'_, ProfilesState>,
-) -> Result<(), String> {
-  let tun_mode = payload.enable_tun_mode.clone();
-
-  let mut verge = verge_state.0.lock().unwrap();
-  wrap_err!(verge.patch_config(payload))?;
-
-  // change tun mode
-  if tun_mode.is_some() {
-    let mut clash = clash_state.0.lock().unwrap();
-    let profiles = profiles_state.0.lock().unwrap();
-
-    wrap_err!(clash.tun_mode(tun_mode.unwrap()))?;
-    clash.update_config();
-    wrap_err!(clash.activate(&profiles, false))?;
-  }
-
-  Ok(())
+pub fn open_core_dir() -> CmdResult<()> {
+    let core_dir = wrap_err!(tauri::utils::platform::current_exe())?;
+    let core_dir = core_dir.parent().ok_or(format!("failed to get core dir"))?;
+    wrap_err!(open::that(core_dir))
 }
 
-/// kill all sidecars when update app
 #[tauri::command]
-pub fn kill_sidecars() {
-  api::process::kill_children();
+pub fn open_logs_dir() -> CmdResult<()> {
+    let log_dir = wrap_err!(dirs::app_logs_dir())?;
+    wrap_err!(open::that(log_dir))
 }
 
-/// open app config dir
 #[tauri::command]
-pub fn open_app_dir() -> Result<(), String> {
-  let app_dir = dirs::app_home_dir();
-  open_path_cmd(app_dir, "failed to open app dir")
+pub fn open_web_url(url: String) -> CmdResult<()> {
+    wrap_err!(open::that(url))
 }
 
-/// open logs dir
 #[tauri::command]
-pub fn open_logs_dir() -> Result<(), String> {
-  let log_dir = dirs::app_logs_dir();
-  open_path_cmd(log_dir, "failed to open logs dir")
-}
-
-/// get open/explorer command
-fn open_path_cmd(dir: PathBuf, err_str: &str) -> Result<(), String> {
-  #[cfg(target_os = "windows")]
-  {
-    use std::os::windows::process::CommandExt;
-
-    match Command::new("explorer")
-      .creation_flags(0x08000000)
-      .arg(dir)
-      .spawn()
-    {
-      Ok(_) => Ok(()),
-      Err(_) => Err(err_str.into()),
+pub async fn clash_api_get_proxy_delay(
+    name: String,
+    url: Option<String>,
+) -> CmdResult<clash_api::DelayRes> {
+    match clash_api::get_proxy_delay(name, url).await {
+        Ok(res) => Ok(res),
+        Err(err) => Err(format!("{}", err.to_string())),
     }
-  }
+}
 
-  #[cfg(not(target_os = "windows"))]
-  match Command::new("open").arg(dir).spawn() {
-    Ok(_) => Ok(()),
-    Err(_) => Err(err_str.into()),
-  }
+#[cfg(windows)]
+pub mod service {
+    use super::*;
+    use crate::core::win_service;
+
+    #[tauri::command]
+    pub async fn check_service() -> CmdResult<win_service::JsonResponse> {
+        wrap_err!(win_service::check_service().await)
+    }
+
+    #[tauri::command]
+    pub async fn install_service() -> CmdResult {
+        wrap_err!(win_service::install_service().await)
+    }
+
+    #[tauri::command]
+    pub async fn uninstall_service() -> CmdResult {
+        wrap_err!(win_service::uninstall_service().await)
+    }
+}
+
+#[cfg(not(windows))]
+pub mod service {
+    use super::*;
+
+    #[tauri::command]
+    pub async fn check_service() -> CmdResult {
+        Ok(())
+    }
+    #[tauri::command]
+    pub async fn install_service() -> CmdResult {
+        Ok(())
+    }
+    #[tauri::command]
+    pub async fn uninstall_service() -> CmdResult {
+        Ok(())
+    }
 }

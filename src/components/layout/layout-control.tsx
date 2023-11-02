@@ -6,7 +6,7 @@ import {
   HorizontalRuleRounded,
 } from "@mui/icons-material";
 
-const LayoutControl = () => {
+export const LayoutControl = () => {
   const minWidth = 40;
 
   return (
@@ -30,12 +30,10 @@ const LayoutControl = () => {
       <Button
         size="small"
         sx={{ minWidth, svg: { transform: "scale(1.05)" } }}
-        onClick={() => appWindow.hide()}
+        onClick={() => appWindow.close()}
       >
         <CloseRounded fontSize="small" />
       </Button>
     </>
   );
 };
-
-export default LayoutControl;

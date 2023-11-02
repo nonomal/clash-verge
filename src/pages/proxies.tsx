@@ -1,88 +1,87 @@
-import useSWR, { useSWRConfig } from "swr";
-import { useEffect } from "react";
+import useSWR from "swr";
+import { useEffect, useMemo } from "react";
 import { useLockFn } from "ahooks";
-import { Button, ButtonGroup, List, Paper } from "@mui/material";
-import { getClashConfig, updateConfigs } from "../services/api";
-import { patchClashConfig } from "../services/cmds";
-import { getProxies } from "../services/api";
-import BasePage from "../components/base/base-page";
-import ProxyGroup from "../components/proxy/proxy-group";
-import ProxyGlobal from "../components/proxy/proxy-global";
+import { useTranslation } from "react-i18next";
+import { Box, Button, ButtonGroup, Paper } from "@mui/material";
+import {
+  closeAllConnections,
+  getClashConfig,
+  updateConfigs,
+} from "@/services/api";
+import { patchClashConfig } from "@/services/cmds";
+import { useVerge } from "@/hooks/use-verge";
+import { BasePage } from "@/components/base";
+import { ProxyGroups } from "@/components/proxy/proxy-groups";
+import { ProviderButton } from "@/components/proxy/provider-button";
 
 const ProxyPage = () => {
-  const { mutate } = useSWRConfig();
-  const { data: proxiesData } = useSWR("getProxies", getProxies);
-  const { data: clashConfig } = useSWR("getClashConfig", getClashConfig);
+  const { t } = useTranslation();
 
-  const modeList = ["rule", "global", "direct"];
-  const curMode = clashConfig?.mode.toLowerCase() ?? "direct";
-  const { groups = [], proxies = [] } = proxiesData ?? {};
+  const { data: clashConfig, mutate: mutateClash } = useSWR(
+    "getClashConfig",
+    getClashConfig
+  );
 
-  // make sure that fetch the proxies successfully
-  useEffect(() => {
-    if (
-      (curMode === "rule" && !groups.length) ||
-      (curMode === "global" && proxies.length < 2)
-    ) {
-      setTimeout(() => mutate("getProxies"), 500);
+  const { verge } = useVerge();
+
+  const modeList = useMemo(() => {
+    if (verge?.clash_core === "clash-meta") {
+      return ["rule", "global", "direct"];
     }
-  }, [groups, proxies, curMode]);
+    return ["rule", "global", "direct", "script"];
+  }, [verge?.clash_core]);
+
+  const curMode = clashConfig?.mode?.toLowerCase();
 
   const onChangeMode = useLockFn(async (mode: string) => {
-    // switch rapidly
+    // 断开连接
+    if (mode !== curMode && verge?.auto_close_connection) {
+      closeAllConnections();
+    }
     await updateConfigs({ mode });
     await patchClashConfig({ mode });
-    mutate("getClashConfig");
+    mutateClash();
   });
 
-  // difference style
-  const showGroup = curMode === "rule" && !!groups.length;
-  const pageStyle = showGroup ? {} : { height: "100%" };
-  const paperStyle: any = showGroup
-    ? { mb: 0.5 }
-    : { py: 1, height: "100%", boxSizing: "border-box" };
+  useEffect(() => {
+    if (curMode && !modeList.includes(curMode)) {
+      onChangeMode("rule");
+    }
+  }, [curMode]);
 
   return (
     <BasePage
-      contentStyle={pageStyle}
-      title={showGroup ? "Proxy Groups" : "Proxies"}
+      contentStyle={{ height: "100%" }}
+      title={t("Proxy Groups")}
       header={
-        <ButtonGroup size="small">
-          {modeList.map((mode) => (
-            <Button
-              key={mode}
-              variant={mode === curMode ? "contained" : "outlined"}
-              onClick={() => onChangeMode(mode)}
-              sx={{ textTransform: "capitalize" }}
-            >
-              {mode}
-            </Button>
-          ))}
-        </ButtonGroup>
+        <Box display="flex" alignItems="center" gap={1}>
+          <ProviderButton />
+
+          <ButtonGroup size="small">
+            {modeList.map((mode) => (
+              <Button
+                key={mode}
+                variant={mode === curMode ? "contained" : "outlined"}
+                onClick={() => onChangeMode(mode)}
+                sx={{ textTransform: "capitalize" }}
+              >
+                {t(mode)}
+              </Button>
+            ))}
+          </ButtonGroup>
+        </Box>
       }
     >
-      <Paper sx={{ borderRadius: 1, boxShadow: 2, ...paperStyle }}>
-        {curMode === "rule" && !!groups.length && (
-          <List>
-            {groups.map((group) => (
-              <ProxyGroup key={group.name} group={group} />
-            ))}
-          </List>
-        )}
-        {((curMode === "rule" && !groups.length) || curMode === "global") && (
-          <ProxyGlobal
-            groupName="GLOBAL"
-            curProxy={proxiesData?.global?.now}
-            proxies={proxies}
-          />
-        )}
-        {curMode === "direct" && (
-          <ProxyGlobal
-            groupName="DIRECT"
-            curProxy="DIRECT"
-            proxies={[proxiesData?.direct!].filter(Boolean)}
-          />
-        )}
+      <Paper
+        sx={{
+          borderRadius: 1,
+          boxShadow: 2,
+          height: "100%",
+          boxSizing: "border-box",
+          py: 1,
+        }}
+      >
+        <ProxyGroups mode={curMode!} />
       </Paper>
     </BasePage>
   );

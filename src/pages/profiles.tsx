@@ -1,32 +1,61 @@
-import useSWR, { useSWRConfig } from "swr";
+import useSWR, { mutate } from "swr";
+import { useMemo, useRef, useState } from "react";
 import { useLockFn } from "ahooks";
-import { useEffect, useMemo, useState } from "react";
-import { Box, Button, Grid, TextField } from "@mui/material";
+import { useSetRecoilState } from "recoil";
+import { Box, Button, Grid, IconButton, Stack, TextField } from "@mui/material";
+import {
+  ClearRounded,
+  ContentCopyRounded,
+  LocalFireDepartmentRounded,
+  RefreshRounded,
+  TextSnippetOutlined,
+} from "@mui/icons-material";
+import { useTranslation } from "react-i18next";
 import {
   getProfiles,
-  patchProfile,
-  deleteProfile,
-  selectProfile,
   importProfile,
   enhanceProfiles,
-  changeProfileChain,
-} from "../services/cmds";
-import { getProxies, updateProxy } from "../services/api";
-import Notice from "../components/base/base-notice";
-import BasePage from "../components/base/base-page";
-import ProfileNew from "../components/profile/profile-new";
-import ProfileItem from "../components/profile/profile-item";
-import ProfileMore from "../components/profile/profile-more";
+  getRuntimeLogs,
+  deleteProfile,
+  updateProfile,
+} from "@/services/cmds";
+import { atomLoadingCache } from "@/services/states";
+import { closeAllConnections } from "@/services/api";
+import { BasePage, DialogRef, Notice } from "@/components/base";
+import {
+  ProfileViewer,
+  ProfileViewerRef,
+} from "@/components/profile/profile-viewer";
+import { ProfileItem } from "@/components/profile/profile-item";
+import { ProfileMore } from "@/components/profile/profile-more";
+import { useProfiles } from "@/hooks/use-profiles";
+import { ConfigViewer } from "@/components/setting/mods/config-viewer";
+import { throttle } from "lodash-es";
 
 const ProfilePage = () => {
-  const { mutate } = useSWRConfig();
+  const { t } = useTranslation();
 
   const [url, setUrl] = useState("");
   const [disabled, setDisabled] = useState(false);
-  const [dialogOpen, setDialogOpen] = useState(false);
+  const [activating, setActivating] = useState("");
 
-  const { data: profiles = {} } = useSWR("getProfiles", getProfiles);
+  const {
+    profiles = {},
+    activateSelected,
+    patchProfiles,
+    mutateProfiles,
+  } = useProfiles();
 
+  const { data: chainLogs = {}, mutate: mutateLogs } = useSWR(
+    "getRuntimeLogs",
+    getRuntimeLogs
+  );
+
+  const chain = profiles.chain || [];
+  const viewerRef = useRef<ProfileViewerRef>(null);
+  const configRef = useRef<DialogRef>(null);
+
+  // distinguish type
   const { regularItems, enhanceItems } = useMemo(() => {
     const items = profiles.items || [];
     const chain = profiles.chain || [];
@@ -34,58 +63,16 @@ const ProfilePage = () => {
     const type1 = ["local", "remote"];
     const type2 = ["merge", "script"];
 
-    const regularItems = items.filter((i) => type1.includes(i.type!));
-    const restItems = items.filter((i) => type2.includes(i.type!));
-
+    const regularItems = items.filter((i) => i && type1.includes(i.type!));
+    const restItems = items.filter((i) => i && type2.includes(i.type!));
     const restMap = Object.fromEntries(restItems.map((i) => [i.uid, i]));
-
     const enhanceItems = chain
       .map((i) => restMap[i]!)
+      .filter(Boolean)
       .concat(restItems.filter((i) => !chain.includes(i.uid)));
 
     return { regularItems, enhanceItems };
   }, [profiles]);
-
-  useEffect(() => {
-    if (profiles.current == null) return;
-
-    const current = profiles.current;
-    const profile = regularItems.find((p) => p.uid === current);
-    if (!profile) return;
-
-    setTimeout(async () => {
-      const proxiesData = await getProxies();
-      mutate("getProxies", proxiesData);
-
-      // init selected array
-      const { selected = [] } = profile;
-      const selectedMap = Object.fromEntries(
-        selected.map((each) => [each.name!, each.now!])
-      );
-
-      // todo: enhance error handle
-      let hasChange = false;
-      proxiesData.groups.forEach((group) => {
-        const { name, now } = group;
-
-        if (!now || selectedMap[name] === now) return;
-        if (selectedMap[name] == null) {
-          selectedMap[name] = now!;
-        } else {
-          hasChange = true;
-          updateProxy(name, selectedMap[name]);
-        }
-      });
-      // update profile selected list
-      profile.selected = Object.entries(selectedMap).map(([name, now]) => ({
-        name,
-        now,
-      }));
-      patchProfile(current!, profile).catch(console.error);
-      // update proxies cache
-      if (hasChange) mutate("getProxies", getProxies());
-    }, 100);
-  }, [profiles, regularItems]);
 
   const onImport = async () => {
     if (!url) return;
@@ -99,57 +86,69 @@ const ProfilePage = () => {
       getProfiles().then((newProfiles) => {
         mutate("getProfiles", newProfiles);
 
-        if (!newProfiles.current && newProfiles.items?.length) {
-          const current = newProfiles.items[0].uid;
-          selectProfile(current);
-          mutate("getProfiles", { ...newProfiles, current }, true);
+        const remoteItem = newProfiles.items?.find((e) => e.type === "remote");
+        if (!newProfiles.current && remoteItem) {
+          const current = remoteItem.uid;
+          patchProfiles({ current });
+          mutateLogs();
+          setTimeout(() => activateSelected(), 2000);
         }
       });
-    } catch {
-      Notice.error("Failed to import profile.");
+    } catch (err: any) {
+      Notice.error(err.message || err.toString());
     } finally {
       setDisabled(false);
     }
   };
 
-  const onSelect = useLockFn(async (uid: string, force: boolean) => {
-    if (!force && uid === profiles.current) return;
-
+  const onSelect = useLockFn(async (current: string, force: boolean) => {
+    if (!force && current === profiles.current) return;
+    // 避免大多数情况下loading态闪烁
+    const reset = setTimeout(() => setActivating(current), 100);
     try {
-      await selectProfile(uid);
-      mutate("getProfiles", { ...profiles, current: uid }, true);
+      await patchProfiles({ current });
+      mutateLogs();
+      closeAllConnections();
+      setTimeout(() => activateSelected(), 2000);
+      Notice.success("Refresh clash config", 1000);
     } catch (err: any) {
-      Notice.error(err?.message || err.toString());
+      Notice.error(err?.message || err.toString(), 4000);
+    } finally {
+      clearTimeout(reset);
+      setActivating("");
     }
   });
 
-  /** enhanced profile mode */
-
-  const chain = profiles.chain || [];
-
-  const onEnhance = useLockFn(enhanceProfiles);
-
-  const onEnhanceEnable = useLockFn(async (uid: string) => {
-    if (chain.includes(uid)) return;
-
-    const newChain = [...chain, uid];
-    await changeProfileChain(newChain);
-    mutate("getProfiles", { ...profiles, chain: newChain }, true);
-  });
-
-  const onEnhanceDisable = useLockFn(async (uid: string) => {
-    if (!chain.includes(uid)) return;
-
-    const newChain = chain.filter((i) => i !== uid);
-    await changeProfileChain(newChain);
-    mutate("getProfiles", { ...profiles, chain: newChain }, true);
-  });
-
-  const onEnhanceDelete = useLockFn(async (uid: string) => {
+  const onEnhance = useLockFn(async () => {
     try {
-      await onEnhanceDisable(uid);
+      await enhanceProfiles();
+      mutateLogs();
+      Notice.success("Refresh clash config", 1000);
+    } catch (err: any) {
+      Notice.error(err.message || err.toString(), 3000);
+    }
+  });
+
+  const onEnable = useLockFn(async (uid: string) => {
+    if (chain.includes(uid)) return;
+    const newChain = [...chain, uid];
+    await patchProfiles({ chain: newChain });
+    mutateLogs();
+  });
+
+  const onDisable = useLockFn(async (uid: string) => {
+    if (!chain.includes(uid)) return;
+    const newChain = chain.filter((i) => i !== uid);
+    await patchProfiles({ chain: newChain });
+    mutateLogs();
+  });
+
+  const onDelete = useLockFn(async (uid: string) => {
+    try {
+      await onDisable(uid);
       await deleteProfile(uid);
-      mutate("getProfiles");
+      mutateProfiles();
+      mutateLogs();
     } catch (err: any) {
       Notice.error(err?.message || err.toString());
     }
@@ -157,76 +156,177 @@ const ProfilePage = () => {
 
   const onMoveTop = useLockFn(async (uid: string) => {
     if (!chain.includes(uid)) return;
-
     const newChain = [uid].concat(chain.filter((i) => i !== uid));
-    await changeProfileChain(newChain);
-    mutate("getProfiles", { ...profiles, chain: newChain }, true);
+    await patchProfiles({ chain: newChain });
+    mutateLogs();
   });
 
   const onMoveEnd = useLockFn(async (uid: string) => {
     if (!chain.includes(uid)) return;
-
     const newChain = chain.filter((i) => i !== uid).concat([uid]);
-    await changeProfileChain(newChain);
-    mutate("getProfiles", { ...profiles, chain: newChain }, true);
+    await patchProfiles({ chain: newChain });
+    mutateLogs();
   });
 
+  // 更新所有配置
+  const setLoadingCache = useSetRecoilState(atomLoadingCache);
+  const onUpdateAll = useLockFn(async () => {
+    const throttleMutate = throttle(mutateProfiles, 2000, {
+      trailing: true,
+    });
+    const updateOne = async (uid: string) => {
+      try {
+        await updateProfile(uid);
+        throttleMutate();
+      } finally {
+        setLoadingCache((cache) => ({ ...cache, [uid]: false }));
+      }
+    };
+
+    return new Promise((resolve) => {
+      setLoadingCache((cache) => {
+        // 获取没有正在更新的配置
+        const items = regularItems.filter(
+          (e) => e.type === "remote" && !cache[e.uid]
+        );
+        const change = Object.fromEntries(items.map((e) => [e.uid, true]));
+
+        Promise.allSettled(items.map((e) => updateOne(e.uid))).then(resolve);
+        return { ...cache, ...change };
+      });
+    });
+  });
+
+  const onCopyLink = async () => {
+    const text = await navigator.clipboard.readText();
+    if (text) setUrl(text);
+  };
+
   return (
-    <BasePage title="Profiles">
-      <Box sx={{ display: "flex", mb: 2.5 }}>
+    <BasePage
+      title={t("Profiles")}
+      header={
+        <Box sx={{ mt: 1, display: "flex", alignItems: "center", gap: 1 }}>
+          <IconButton
+            size="small"
+            color="inherit"
+            title={t("Update All Profiles")}
+            onClick={onUpdateAll}
+          >
+            <RefreshRounded />
+          </IconButton>
+
+          <IconButton
+            size="small"
+            color="inherit"
+            title={t("View Runtime Config")}
+            onClick={() => configRef.current?.open()}
+          >
+            <TextSnippetOutlined />
+          </IconButton>
+
+          <IconButton
+            size="small"
+            color="primary"
+            title={t("Reactivate Profiles")}
+            onClick={onEnhance}
+          >
+            <LocalFireDepartmentRounded />
+          </IconButton>
+        </Box>
+      }
+    >
+      <Stack direction="row" spacing={1} sx={{ mb: 2 }}>
         <TextField
-          id="clas_verge_profile_url"
-          name="profile_url"
-          label="Profile URL"
-          size="small"
+          hiddenLabel
           fullWidth
+          size="small"
           value={url}
+          variant="outlined"
+          autoComplete="off"
+          spellCheck="false"
           onChange={(e) => setUrl(e.target.value)}
-          sx={{ mr: 1 }}
+          sx={{ input: { py: 0.65, px: 1.25 } }}
+          placeholder={t("Profile URL")}
+          InputProps={{
+            sx: { pr: 1 },
+            endAdornment: !url ? (
+              <IconButton
+                size="small"
+                sx={{ p: 0.5 }}
+                title={t("Paste")}
+                onClick={onCopyLink}
+              >
+                <ContentCopyRounded fontSize="inherit" />
+              </IconButton>
+            ) : (
+              <IconButton
+                size="small"
+                sx={{ p: 0.5 }}
+                title={t("Clear")}
+                onClick={() => setUrl("")}
+              >
+                <ClearRounded fontSize="inherit" />
+              </IconButton>
+            ),
+          }}
         />
         <Button
           disabled={!url || disabled}
           variant="contained"
+          size="small"
           onClick={onImport}
-          sx={{ mr: 1 }}
         >
-          Import
+          {t("Import")}
         </Button>
-        <Button variant="contained" onClick={() => setDialogOpen(true)}>
-          New
+        <Button
+          variant="contained"
+          size="small"
+          onClick={() => viewerRef.current?.create()}
+        >
+          {t("New")}
         </Button>
+      </Stack>
+
+      <Box sx={{ mb: 4.5 }}>
+        <Grid container spacing={{ xs: 2, lg: 3 }}>
+          {regularItems.map((item) => (
+            <Grid item xs={12} sm={6} md={4} lg={3} key={item.file}>
+              <ProfileItem
+                selected={profiles.current === item.uid}
+                activating={activating === item.uid}
+                itemData={item}
+                onSelect={(f) => onSelect(item.uid, f)}
+                onEdit={() => viewerRef.current?.edit(item)}
+              />
+            </Grid>
+          ))}
+        </Grid>
       </Box>
 
-      <Grid container spacing={2}>
-        {regularItems.map((item) => (
-          <Grid item xs={12} sm={6} key={item.file}>
-            <ProfileItem
-              selected={profiles.current === item.uid}
-              itemData={item}
-              onSelect={(f) => onSelect(item.uid, f)}
-            />
-          </Grid>
-        ))}
-      </Grid>
+      {enhanceItems.length > 0 && (
+        <Grid container spacing={{ xs: 2, lg: 3 }}>
+          {enhanceItems.map((item) => (
+            <Grid item xs={12} sm={6} md={4} lg={3} key={item.file}>
+              <ProfileMore
+                selected={!!chain.includes(item.uid)}
+                itemData={item}
+                enableNum={chain.length || 0}
+                logInfo={chainLogs[item.uid]}
+                onEnable={() => onEnable(item.uid)}
+                onDisable={() => onDisable(item.uid)}
+                onDelete={() => onDelete(item.uid)}
+                onMoveTop={() => onMoveTop(item.uid)}
+                onMoveEnd={() => onMoveEnd(item.uid)}
+                onEdit={() => viewerRef.current?.edit(item)}
+              />
+            </Grid>
+          ))}
+        </Grid>
+      )}
 
-      <Grid container spacing={2} sx={{ mt: 3 }}>
-        {enhanceItems.map((item) => (
-          <Grid item xs={12} sm={6} key={item.file}>
-            <ProfileMore
-              selected={!!profiles.chain?.includes(item.uid)}
-              itemData={item}
-              onEnable={() => onEnhanceEnable(item.uid)}
-              onDisable={() => onEnhanceDisable(item.uid)}
-              onDelete={() => onEnhanceDelete(item.uid)}
-              onMoveTop={() => onMoveTop(item.uid)}
-              onMoveEnd={() => onMoveEnd(item.uid)}
-              onEnhance={onEnhance}
-            />
-          </Grid>
-        ))}
-      </Grid>
-
-      <ProfileNew open={dialogOpen} onClose={() => setDialogOpen(false)} />
+      <ProfileViewer ref={viewerRef} onChange={() => mutateProfiles()} />
+      <ConfigViewer ref={configRef} />
     </BasePage>
   );
 };

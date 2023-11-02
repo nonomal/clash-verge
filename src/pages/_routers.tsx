@@ -3,30 +3,36 @@ import ProxiesPage from "./proxies";
 import ProfilesPage from "./profiles";
 import SettingsPage from "./settings";
 import ConnectionsPage from "./connections";
+import RulesPage from "./rules";
 
 export const routers = [
   {
-    label: "Proxies",
+    label: "Label-Proxies",
     link: "/",
     ele: ProxiesPage,
   },
   {
-    label: "Profiles",
+    label: "Label-Profiles",
     link: "/profile",
     ele: ProfilesPage,
   },
   {
-    label: "Connections",
+    label: "Label-Connections",
     link: "/connections",
     ele: ConnectionsPage,
   },
   {
-    label: "Logs",
+    label: "Label-Rules",
+    link: "/rules",
+    ele: RulesPage,
+  },
+  {
+    label: "Label-Logs",
     link: "/logs",
     ele: LogsPage,
   },
   {
-    label: "Settings",
+    label: "Label-Settings",
     link: "/settings",
     ele: SettingsPage,
   },

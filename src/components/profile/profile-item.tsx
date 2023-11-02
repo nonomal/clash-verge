@@ -1,91 +1,100 @@
 import dayjs from "dayjs";
-import { useLockFn } from "ahooks";
-import { useSWRConfig } from "swr";
+import { mutate } from "swr";
 import { useEffect, useState } from "react";
+import { useLockFn } from "ahooks";
+import { useRecoilState } from "recoil";
+import { useTranslation } from "react-i18next";
 import {
-  alpha,
   Box,
-  styled,
   Typography,
   LinearProgress,
   IconButton,
   keyframes,
   MenuItem,
   Menu,
+  CircularProgress,
 } from "@mui/material";
 import { RefreshRounded } from "@mui/icons-material";
-import { CmdType } from "../../services/types";
-import { updateProfile, deleteProfile, viewProfile } from "../../services/cmds";
-import relativeTime from "dayjs/plugin/relativeTime";
-import parseTraffic from "../../utils/parse-traffic";
-import ProfileEdit from "./profile-edit";
-import Notice from "../base/base-notice";
-
-dayjs.extend(relativeTime);
-
-const Wrapper = styled(Box)(({ theme }) => ({
-  width: "100%",
-  display: "block",
-  cursor: "pointer",
-  textAlign: "left",
-  borderRadius: theme.shape.borderRadius,
-  boxShadow: theme.shadows[2],
-  padding: "8px 16px",
-  boxSizing: "border-box",
-}));
+import { atomLoadingCache } from "@/services/states";
+import { updateProfile, deleteProfile, viewProfile } from "@/services/cmds";
+import { Notice } from "@/components/base";
+import { EditorViewer } from "./editor-viewer";
+import { ProfileBox } from "./profile-box";
+import parseTraffic from "@/utils/parse-traffic";
 
 const round = keyframes`
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 `;
 
-// save the state of each item loading
-const loadingCache: Record<string, boolean> = {};
-
 interface Props {
   selected: boolean;
-  itemData: CmdType.ProfileItem;
+  activating: boolean;
+  itemData: IProfileItem;
   onSelect: (force: boolean) => void;
+  onEdit: () => void;
 }
 
-const ProfileItem = (props: Props) => {
-  const { selected, itemData, onSelect } = props;
+export const ProfileItem = (props: Props) => {
+  const { selected, activating, itemData, onSelect, onEdit } = props;
 
-  const { mutate } = useSWRConfig();
-  const [loading, setLoading] = useState(loadingCache[itemData.uid] ?? false);
+  const { t } = useTranslation();
   const [anchorEl, setAnchorEl] = useState<any>(null);
   const [position, setPosition] = useState({ left: 0, top: 0 });
+  const [loadingCache, setLoadingCache] = useRecoilState(atomLoadingCache);
 
-  const { name = "Profile", extra, updated = 0 } = itemData;
+  const { uid, name = "Profile", extra, updated = 0 } = itemData;
+
+  // local file mode
+  // remote file mode
+  const hasUrl = !!itemData.url;
+  const hasExtra = !!extra; // only subscription url has extra info
+
   const { upload = 0, download = 0, total = 0 } = extra ?? {};
   const from = parseUrl(itemData.url);
   const expire = parseExpire(extra?.expire);
   const progress = Math.round(((download + upload) * 100) / (total + 0.1));
-  const fromnow = updated > 0 ? dayjs(updated * 1000).fromNow() : "";
 
-  // local file mode
-  // remote file mode
-  // subscription url mode
-  const hasUrl = !!itemData.url;
-  const hasExtra = !!extra; // only subscription url has extra info
+  const loading = loadingCache[itemData.uid] ?? false;
 
+  // interval update fromNow field
+  const [, setRefresh] = useState({});
   useEffect(() => {
-    loadingCache[itemData.uid] = loading;
-  }, [itemData, loading]);
+    if (!hasUrl) return;
 
-  const [editOpen, setEditOpen] = useState(false);
-  const onEdit = () => {
+    let timer: any = null;
+
+    const handler = () => {
+      const now = Date.now();
+      const lastUpdate = updated * 1000;
+      // 大于一天的不管
+      if (now - lastUpdate >= 24 * 36e5) return;
+
+      const wait = now - lastUpdate >= 36e5 ? 30e5 : 5e4;
+
+      timer = setTimeout(() => {
+        setRefresh({});
+        handler();
+      }, wait);
+    };
+
+    handler();
+
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [hasUrl, updated]);
+
+  const [fileOpen, setFileOpen] = useState(false);
+
+  const onEditInfo = () => {
     setAnchorEl(null);
-    setEditOpen(true);
+    onEdit();
   };
 
-  const onView = async () => {
+  const onEditFile = () => {
     setAnchorEl(null);
-    try {
-      await viewProfile(itemData.uid);
-    } catch (err: any) {
-      Notice.error(err?.message || err.toString());
-    }
+    setFileOpen(true);
   };
 
   const onForceSelect = () => {
@@ -93,19 +102,51 @@ const ProfileItem = (props: Props) => {
     onSelect(true);
   };
 
-  const onUpdateWrapper = (withProxy: boolean) => async () => {
+  const onOpenFile = useLockFn(async () => {
     setAnchorEl(null);
-    if (loading) return;
-    setLoading(true);
     try {
-      await updateProfile(itemData.uid, withProxy);
-      setLoading(false);
-      mutate("getProfiles");
+      await viewProfile(itemData.uid);
     } catch (err: any) {
-      setLoading(false);
       Notice.error(err?.message || err.toString());
     }
-  };
+  });
+
+  /// 0 不使用任何代理
+  /// 1 使用配置好的代理
+  /// 2 至少使用一个代理，根据配置，如果没配置，默认使用系统代理
+  const onUpdate = useLockFn(async (type: 0 | 1 | 2) => {
+    setAnchorEl(null);
+    setLoadingCache((cache) => ({ ...cache, [itemData.uid]: true }));
+
+    const option: Partial<IProfileOption> = {};
+
+    if (type === 0) {
+      option.with_proxy = false;
+      option.self_proxy = false;
+    } else if (type === 1) {
+      // nothing
+    } else if (type === 2) {
+      if (itemData.option?.self_proxy) {
+        option.with_proxy = false;
+        option.self_proxy = true;
+      } else {
+        option.with_proxy = true;
+        option.self_proxy = false;
+      }
+    }
+
+    try {
+      await updateProfile(itemData.uid, option);
+      mutate("getProfiles");
+    } catch (err: any) {
+      const errmsg = err?.message || err.toString();
+      Notice.error(
+        errmsg.replace(/error sending request for url (\S+?): /, "")
+      );
+    } finally {
+      setLoadingCache((cache) => ({ ...cache, [itemData.uid]: false }));
+    }
+  });
 
   const onDelete = useLockFn(async () => {
     setAnchorEl(null);
@@ -117,6 +158,23 @@ const ProfileItem = (props: Props) => {
     }
   });
 
+  const urlModeMenu = [
+    { label: "Select", handler: onForceSelect },
+    { label: "Edit Info", handler: onEditInfo },
+    { label: "Edit File", handler: onEditFile },
+    { label: "Open File", handler: onOpenFile },
+    { label: "Update", handler: () => onUpdate(0) },
+    { label: "Update(Proxy)", handler: () => onUpdate(2) },
+    { label: "Delete", handler: onDelete },
+  ];
+  const fileModeMenu = [
+    { label: "Select", handler: onForceSelect },
+    { label: "Edit Info", handler: onEditInfo },
+    { label: "Edit File", handler: onEditFile },
+    { label: "Open File", handler: onOpenFile },
+    { label: "Delete", handler: onDelete },
+  ];
+
   const boxStyle = {
     height: 26,
     display: "flex",
@@ -124,51 +182,10 @@ const ProfileItem = (props: Props) => {
     justifyContent: "space-between",
   };
 
-  const urlModeMenu = [
-    { label: "Select", handler: onForceSelect },
-    { label: "Edit", handler: onEdit },
-    { label: "File", handler: onView },
-    { label: "Update", handler: onUpdateWrapper(false) },
-    { label: "Update(Proxy)", handler: onUpdateWrapper(true) },
-    { label: "Delete", handler: onDelete },
-  ];
-  const fileModeMenu = [
-    { label: "Select", handler: onForceSelect },
-    { label: "Edit", handler: onEdit },
-    { label: "File", handler: onView },
-    { label: "Delete", handler: onDelete },
-  ];
-
   return (
     <>
-      <Wrapper
-        sx={({ palette }) => {
-          const { mode, primary, text, grey } = palette;
-          const key = `${mode}-${selected}`;
-
-          const bgcolor = {
-            "light-true": alpha(primary.main, 0.15),
-            "light-false": palette.background.paper,
-            "dark-true": alpha(primary.main, 0.35),
-            "dark-false": alpha(grey[700], 0.35),
-          }[key]!;
-
-          const color = {
-            "light-true": text.secondary,
-            "light-false": text.secondary,
-            "dark-true": alpha(text.secondary, 0.6),
-            "dark-false": alpha(text.secondary, 0.6),
-          }[key]!;
-
-          const h2color = {
-            "light-true": primary.main,
-            "light-false": text.primary,
-            "dark-true": primary.light,
-            "dark-false": text.primary,
-          }[key]!;
-
-          return { bgcolor, color, "& h2": { color: h2color } };
-        }}
+      <ProfileBox
+        aria-selected={selected}
         onClick={() => onSelect(false)}
         onContextMenu={(event) => {
           const { clientX, clientY } = event;
@@ -177,9 +194,28 @@ const ProfileItem = (props: Props) => {
           event.preventDefault();
         }}
       >
-        <Box display="flex" justifyContent="space-between">
+        {activating && (
+          <Box
+            sx={{
+              position: "absolute",
+              display: "flex",
+              justifyContent: "center",
+              alignItems: "center",
+              top: 10,
+              left: 10,
+              right: 10,
+              bottom: 2,
+              zIndex: 10,
+              backdropFilter: "blur(2px)",
+            }}
+          >
+            <CircularProgress size={20} />
+          </Box>
+        )}
+
+        <Box position="relative">
           <Typography
-            width="calc(100% - 40px)"
+            width="calc(100% - 36px)"
             variant="h6"
             component="h2"
             noWrap
@@ -192,58 +228,61 @@ const ProfileItem = (props: Props) => {
           {hasUrl && (
             <IconButton
               sx={{
-                width: 26,
-                height: 26,
+                position: "absolute",
+                p: "3px",
+                top: -1,
+                right: -5,
                 animation: loading ? `1s linear infinite ${round}` : "none",
               }}
+              size="small"
               color="inherit"
               disabled={loading}
               onClick={(e) => {
                 e.stopPropagation();
-                onUpdateWrapper(false)();
+                onUpdate(1);
               }}
             >
-              <RefreshRounded />
+              <RefreshRounded color="inherit" />
             </IconButton>
           )}
         </Box>
 
         {/* the second line show url's info or description */}
-        {hasUrl ? (
-          <Box sx={boxStyle}>
-            <Typography noWrap title={`From: ${from}`}>
-              {from}
-            </Typography>
+        <Box sx={boxStyle}>
+          {hasUrl ? (
+            <>
+              <Typography noWrap title={`From: ${from}`}>
+                {from}
+              </Typography>
 
-            <Typography
-              noWrap
-              flex="1 0 auto"
-              fontSize={14}
-              textAlign="right"
-              title="updated time"
-            >
-              {fromnow}
-            </Typography>
-          </Box>
-        ) : (
-          <Box sx={boxStyle}>
+              <Typography
+                noWrap
+                flex="1 0 auto"
+                fontSize={14}
+                textAlign="right"
+                title={`Updated Time: ${parseExpire(updated)}`}
+              >
+                {updated > 0 ? dayjs(updated * 1000).fromNow() : ""}
+              </Typography>
+            </>
+          ) : (
             <Typography noWrap title={itemData.desc}>
               {itemData.desc}
             </Typography>
-          </Box>
-        )}
+          )}
+        </Box>
 
         {/* the third line show extra info or last updated time */}
         {hasExtra ? (
           <Box sx={{ ...boxStyle, fontSize: 14 }}>
-            <span title="used / total">
+            <span title="Used / Total">
               {parseTraffic(upload + download)} / {parseTraffic(total)}
             </span>
-            <span title="expire time">{expire}</span>
+            <span title="Expire Time">{expire}</span>
           </Box>
         ) : (
           <Box sx={{ ...boxStyle, fontSize: 14, justifyContent: "flex-end" }}>
-            <span title="updated time">{parseExpire(updated)}</span>
+            <span title="Updated Time">{parseExpire(updated)}</span>
           </Box>
         )}
 
@@ -252,7 +291,7 @@ const ProfileItem = (props: Props) => {
           value={progress}
           color="inherit"
         />
-      </Wrapper>
+      </ProfileBox>
 
       <Menu
         open={!!anchorEl}
@@ -260,6 +299,8 @@ const ProfileItem = (props: Props) => {
         onClose={() => setAnchorEl(null)}
         anchorPosition={position}
         anchorReference="anchorPosition"
+        transitionDuration={225}
+        MenuListProps={{ sx: { py: 0.5 } }}
         onContextMenu={(e) => {
           setAnchorEl(null);
           e.preventDefault();
@@ -269,20 +310,20 @@ const ProfileItem = (props: Props) => {
           <MenuItem
             key={item.label}
             onClick={item.handler}
-            sx={{ minWidth: 133 }}
+            sx={{ minWidth: 120 }}
+            dense
           >
-            {item.label}
+            {t(item.label)}
           </MenuItem>
         ))}
       </Menu>
 
-      {editOpen && (
-        <ProfileEdit
-          open={editOpen}
-          itemData={itemData}
-          onClose={() => setEditOpen(false)}
-        />
-      )}
+      <EditorViewer
+        uid={uid}
+        open={fileOpen}
+        mode="yaml"
+        onClose={() => setFileOpen(false)}
+      />
     </>
   );
 };
@@ -298,5 +339,3 @@ function parseExpire(expire?: number) {
   if (!expire) return "-";
   return dayjs(expire * 1000).format("YYYY-MM-DD");
 }
-
-export default ProfileItem;

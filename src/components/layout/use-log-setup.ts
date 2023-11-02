@@ -1,49 +1,39 @@
 import dayjs from "dayjs";
 import { useEffect } from "react";
-import { useSetRecoilState } from "recoil";
-import { listen } from "@tauri-apps/api/event";
-import { ApiType } from "../../services/types";
-import { getInfomation } from "../../services/api";
-import { atomLogData } from "../../services/states";
+import { useRecoilValue, useSetRecoilState } from "recoil";
+import { getClashLogs } from "@/services/cmds";
+import { useClashInfo } from "@/hooks/use-clash";
+import { atomEnableLog, atomLogData } from "@/services/states";
+import { useWebsocket } from "@/hooks/use-websocket";
 
 const MAX_LOG_NUM = 1000;
 
 // setup the log websocket
-export default function useLogSetup() {
+export const useLogSetup = () => {
+  const { clashInfo } = useClashInfo();
+
+  const enableLog = useRecoilValue(atomEnableLog);
   const setLogData = useSetRecoilState(atomLogData);
 
+  const { connect, disconnect } = useWebsocket((event) => {
+    const data = JSON.parse(event.data) as ILogItem;
+    const time = dayjs().format("MM-DD HH:mm:ss");
+    setLogData((l) => {
+      if (l.length >= MAX_LOG_NUM) l.shift();
+      return [...l, { ...data, time }];
+    });
+  });
+
   useEffect(() => {
-    let ws: WebSocket = null!;
-    let unlisten: () => void = null!;
+    if (!enableLog || !clashInfo) return;
 
-    const handler = (event: MessageEvent<any>) => {
-      const data = JSON.parse(event.data) as ApiType.LogItem;
-      const time = dayjs().format("MM-DD HH:mm:ss");
-      setLogData((l) => {
-        if (l.length >= MAX_LOG_NUM) l.shift();
-        return [...l, { ...data, time }];
-      });
-    };
+    getClashLogs().then(setLogData);
 
-    (async () => {
-      const { server = "", secret = "" } = await getInfomation();
-
-      ws = new WebSocket(`ws://${server}/logs?token=${secret}`);
-      ws.addEventListener("message", handler);
-
-      // reconnect the websocket
-      unlisten = await listen("restart_clash", async () => {
-        const { server = "", secret = "" } = await getInfomation();
-
-        ws?.close();
-        ws = new WebSocket(`ws://${server}/logs?token=${secret}`);
-        ws.addEventListener("message", handler);
-      });
-    })();
+    const { server = "", secret = "" } = clashInfo;
+    connect(`ws://${server}/logs?token=${encodeURIComponent(secret)}`);
 
     return () => {
-      ws?.close();
-      unlisten?.();
+      disconnect();
     };
-  }, []);
-}
+  }, [clashInfo, enableLog]);
+};

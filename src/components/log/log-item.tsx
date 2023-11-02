@@ -1,25 +1,40 @@
 import { styled, Box } from "@mui/material";
-import { ApiType } from "../../services/types";
 
-const Item = styled(Box)(({ theme }) => ({
+const Item = styled(Box)(({ theme: { palette, typography } }) => ({
   padding: "8px 0",
   margin: "0 12px",
   lineHeight: 1.35,
-  borderBottom: `1px solid ${theme.palette.divider}`,
-  "& .time": {},
+  borderBottom: `1px solid ${palette.divider}`,
+  fontSize: "0.875rem",
+  fontFamily: typography.fontFamily,
+  userSelect: "text",
+  "& .time": {
+    color: palette.text.secondary,
+  },
   "& .type": {
     display: "inline-block",
-    padding: "0 6px",
+    marginLeft: 8,
     textAlign: "center",
     borderRadius: 2,
     textTransform: "uppercase",
     fontWeight: "600",
   },
-  "& .data": {},
+  '& .type[data-type="error"], & .type[data-type="err"]': {
+    color: palette.error.main,
+  },
+  '& .type[data-type="warning"], & .type[data-type="warn"]': {
+    color: palette.warning.main,
+  },
+  '& .type[data-type="info"], & .type[data-type="inf"]': {
+    color: palette.info.main,
+  },
+  "& .data": {
+    color: palette.text.primary,
+  },
 }));
 
 interface Props {
-  value: ApiType.LogItem;
+  value: ILogItem;
 }
 
 const LogItem = (props: Props) => {
@@ -27,9 +42,15 @@ const LogItem = (props: Props) => {
 
   return (
     <Item>
-      <span className="time">{value.time}</span>
-      <span className="type">{value.type}</span>
-      <span className="data">{value.payload}</span>
+      <div>
+        <span className="time">{value.time}</span>
+        <span className="type" data-type={value.type.toLowerCase()}>
+          {value.type}
+        </span>
+      </div>
+      <div>
+        <span className="data">{value.payload}</span>
+      </div>
     </Item>
   );
 };
